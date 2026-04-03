@@ -58,23 +58,26 @@ def cmd_train(args: argparse.Namespace) -> None:
 
 
 def cmd_index(args: argparse.Namespace) -> None:
-    """Build all retrieval indexes."""
+    """Build retrieval indexes."""
     setup_logging()
     load_env()
 
     from contextrag.corpus.chunker import chunk_sections
     from contextrag.corpus.loader import load_corpus
     from contextrag.corpus.section_parser import parse_sections
-    from contextrag.index.bm25_store import create_bm25_index
-    from contextrag.index.dense_store import create_conditioned_index, create_contextual_index
     from contextrag.index.persistence import save_chunks, save_raptor_tree
     from contextrag.models import ContextualChunk
-    from contextrag.nn.embed import embed_chunks
+
+    ALL_INDEXES = {"conditioned", "contextual", "coil", "raptor"}
+    indexes = set(args.indexes.split(",")) if args.indexes else ALL_INDEXES
+    invalid = indexes - ALL_INDEXES
+    if invalid:
+        raise ValueError(f"Unknown indexes: {invalid}. Choose from: {sorted(ALL_INDEXES)}")
 
     texts_dir = Path(args.texts_dir)
     force = args.force_rebuild
 
-    # Step 1: Load and chunk corpus
+    # Step 1: Load and chunk corpus (always needed)
     logger.info("Loading corpus from %s", texts_dir)
     doc_pairs = load_corpus(texts_dir)
     doc_texts = {meta.file_name: text for meta, text in doc_pairs}
@@ -86,25 +89,34 @@ def cmd_index(args: argparse.Namespace) -> None:
         all_chunks.extend(chunks)
     logger.info("Total chunks: %d", len(all_chunks))
 
-    # Step 2: Context-conditioned embeddings (custom model)
-    logger.info("Generating context-conditioned embeddings...")
-    ctx_chunks, embeddings = embed_chunks(
-        all_chunks, doc_texts,
-        context_window=args.context_window,
-        device_name=args.device,
-    )
+    # Step 2+3: Context-conditioned embeddings (custom model)
+    if "conditioned" in indexes:
+        from contextrag.nn.embed import embed_chunks
+        from contextrag.index.dense_store import create_conditioned_index
 
-    # Step 3: Store conditioned index
-    logger.info("Indexing conditioned embeddings in ChromaDB...")
-    conditioned_dir = DATABASE_DIR / "conditioned"
-    create_conditioned_index(
-        ctx_chunks, embeddings, conditioned_dir, CONDITIONED_COLLECTION, force_rebuild=force,
-    )
+        logger.info("Generating context-conditioned embeddings...")
+        ctx_chunks, embeddings = embed_chunks(
+            all_chunks, doc_texts,
+            context_window=args.context_window,
+            device_name=args.device,
+        )
 
-    # Step 4: Anthropic-style contextual retrieval (optional)
-    if not args.skip_llm_context:
+        logger.info("Indexing conditioned embeddings in ChromaDB...")
+        conditioned_dir = DATABASE_DIR / "conditioned"
+        create_conditioned_index(
+            ctx_chunks, embeddings, conditioned_dir, CONDITIONED_COLLECTION, force_rebuild=force,
+        )
+    else:
+        # Wrap chunks with preceding context (no model inference)
+        from contextrag.nn.embed import prepare_ctx_chunks
+        ctx_chunks = prepare_ctx_chunks(all_chunks, doc_texts, context_window=args.context_window)
+
+    # Step 4: Anthropic-style contextual retrieval
+    if "contextual" in indexes:
         logger.info("Generating LLM context descriptions...")
         from contextrag.context.contextual import generate_llm_contexts
+        from contextrag.index.dense_store import create_contextual_index
+
         ctx_chunks = generate_llm_contexts(ctx_chunks, doc_texts)
 
         logger.info("Indexing contextual embeddings in ChromaDB...")
@@ -112,16 +124,17 @@ def cmd_index(args: argparse.Namespace) -> None:
         create_contextual_index(
             ctx_chunks, contextual_dir, CONTEXTUAL_COLLECTION, force_rebuild=force,
         )
-    else:
-        logger.info("Skipping LLM context generation (--skip-llm-context)")
 
     # Step 5: COIL/BM25 lexical index
-    logger.info("Building COIL/BM25 lexical index...")
-    bm25_path = DATABASE_DIR / "bm25_coil.pkl"
-    create_bm25_index(ctx_chunks, bm25_path, force_rebuild=force)
+    if "coil" in indexes:
+        from contextrag.index.bm25_store import create_bm25_index
 
-    # Step 6: RAPTOR hierarchy (optional, requires OPENAI_API_KEY)
-    if not args.skip_raptor:
+        logger.info("Building COIL/BM25 lexical index...")
+        bm25_path = DATABASE_DIR / "bm25_coil.pkl"
+        create_bm25_index(ctx_chunks, bm25_path, force_rebuild=force)
+
+    # Step 6: RAPTOR hierarchy
+    if "raptor" in indexes:
         logger.info("Building RAPTOR hierarchy (backend=%s)...", args.raptor_backend)
         from contextrag.hierarchy.backend import get_raptor_backend
 
@@ -131,13 +144,12 @@ def cmd_index(args: argparse.Namespace) -> None:
 
         raptor_dir = DATABASE_DIR / "raptor"
         backend.index_nodes(raptor_nodes, raptor_dir, RAPTOR_COLLECTION, force_rebuild=force)
-    else:
-        logger.info("Skipping RAPTOR hierarchy (--skip-raptor)")
 
     # Step 7: Save chunk data for query-time hydration
     save_chunks(ctx_chunks, DATABASE_DIR / "chunks.json")
 
-    print(f"\nIndexing complete. All data stored in {DATABASE_DIR}")
+    built = ", ".join(sorted(indexes))
+    print(f"\nIndexing complete ({built}). Data stored in {DATABASE_DIR}")
 
 
 # ---------------------------------------------------------------------------

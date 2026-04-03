@@ -33,6 +33,23 @@ def _get_preceding_context(
     return preceding
 
 
+def prepare_ctx_chunks(
+    chunks: list[Chunk],
+    doc_texts: dict[str, str],
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
+) -> list[ContextualChunk]:
+    """Wrap raw Chunks with preceding context — no model inference."""
+    ctx_chunks: list[ContextualChunk] = []
+    for chunk in chunks:
+        preceding = _get_preceding_context(chunk, doc_texts, context_window)
+        ctx_chunks.append(ContextualChunk(
+            chunk=chunk,
+            preceding_context=preceding,
+            conditioned_embedding_text=f"{preceding}\n\n{chunk.text}" if preceding else chunk.text,
+        ))
+    return ctx_chunks
+
+
 def embed_chunks(
     chunks: list[Chunk],
     doc_texts: dict[str, str],
@@ -67,15 +84,7 @@ def embed_chunks(
     model.eval()
 
     # Build contextual chunks with preceding context
-    ctx_chunks: list[ContextualChunk] = []
-    for chunk in chunks:
-        preceding = _get_preceding_context(chunk, doc_texts, context_window)
-        ctx_chunk = ContextualChunk(
-            chunk=chunk,
-            preceding_context=preceding,
-            conditioned_embedding_text=f"{preceding}\n\n{chunk.text}" if preceding else chunk.text,
-        )
-        ctx_chunks.append(ctx_chunk)
+    ctx_chunks = prepare_ctx_chunks(chunks, doc_texts, context_window)
 
     # Batch inference
     all_embeddings: list[np.ndarray] = []

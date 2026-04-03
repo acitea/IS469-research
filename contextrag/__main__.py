@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Device name (cuda, mps, cpu). Auto-detected if omitted.")
 
     # -- index ---------------------------------------------------------------
-    p_index = sub.add_parser("index", help="Build all retrieval indexes.")
+    p_index = sub.add_parser("index", help="Build retrieval indexes.")
     p_index.add_argument("--texts-dir", type=str, default=str(TEXTS_DIR),
                          help="Directory containing .md corpus files. Default: %(default)s")
     p_index.add_argument("--force-rebuild", action="store_true",
@@ -45,10 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Preceding context in tokens for conditioned embeddings. Default: %(default)s")
     p_index.add_argument("--device", type=str, default=None,
                          help="Device name (cuda, mps, cpu). Auto-detected if omitted.")
-    p_index.add_argument("--skip-llm-context", action="store_true",
-                         help="Skip Anthropic-style LLM context generation.")
-    p_index.add_argument("--skip-raptor", action="store_true",
-                         help="Skip RAPTOR hierarchy building.")
+    p_index.add_argument("--indexes", type=str, default=None,
+                         help="Comma-separated indexes to build: conditioned,contextual,coil,raptor. Default: all.")
     p_index.add_argument("--raptor-backend", type=str, choices=["custom", "official"], default="custom",
                          help="RAPTOR impl: 'custom' (K-Means) or 'official' (UMAP+GMM). Default: %(default)s")
 
