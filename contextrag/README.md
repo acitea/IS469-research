@@ -17,7 +17,7 @@ This conditioned signal is fused with three complementary retrieval signals to c
 | **Conditioned** | Custom cross-attention NN on frozen BGE-base-en-v1.5 | Semantic meaning influenced by document context |
 | **Contextual** | GPT-4o-mini generates per-chunk context descriptions, embedded with `text-embedding-3-small` | Explicit articulation of chunk's role in the document |
 | **COIL** | Anchor-term-boosted weighted BM25 + Jaccard overlap | Exact entity/date matching (dollar amounts, tickers, years) |
-| **RAPTOR** | Multi-level K-means clustering + LLM summarization tree | Cross-section and cross-document evidence |
+| **RAPTOR** | Multi-level clustering + LLM summarization tree (custom K-Means or official UMAP+GMM) | Cross-section and cross-document evidence |
 
 All signals are combined via **Reciprocal Rank Fusion** (RRF, k=60) into a single ranked result with full per-signal provenance.
 
@@ -72,6 +72,7 @@ All signals are combined via **Reciprocal Rank Fusion** (RRF, k=60) into a singl
 
 ```bash
 uv sync
+uv pip install ./raptor  # official RAPTOR package (local fork)
 ```
 
 ### 1. Train the encoder
@@ -105,24 +106,32 @@ Index the evaluation corpus (`texts/`) using all four signals:
 uv run python -m contextrag index
 ```
 
-Options:
-```
---texts-dir DIR         # corpus directory (default: texts/)
---force-rebuild         # rebuild indexes even if they exist
---context-window 512    # must match the value used during training
---device cuda           # device for conditioned embedding inference
---skip-llm-context      # skip Anthropic-style LLM context generation (saves API cost)
---skip-raptor           # skip RAPTOR hierarchy building (saves API cost)
+Build specific indexes only:
+
+```bash
+uv run python -m contextrag index --indexes conditioned,coil
+uv run python -m contextrag index --indexes raptor --raptor-backend official
+uv run python -m contextrag index --indexes contextual --force-rebuild
 ```
 
-The indexing pipeline runs 7 steps:
-1. Load and chunk the corpus (fixed 1000-char chunks, 200-char overlap, section-aware)
-2. Generate context-conditioned embeddings (custom model)
-3. Store conditioned embeddings in ChromaDB
-4. Generate LLM context descriptions via GPT-4o-mini (cached)
-5. Store contextual embeddings in ChromaDB (OpenAI text-embedding-3-small)
-6. Build COIL/BM25 lexical index with anchor-term boosting
-7. Build RAPTOR hierarchy (cluster, summarize, repeat up to 3 levels)
+Options:
+```
+--texts-dir DIR                  # corpus directory (default: texts/)
+--force-rebuild                  # rebuild indexes even if they exist
+--context-window 512             # must match the value used during training
+--device cuda                    # device for conditioned embedding inference
+--indexes conditioned,contextual,coil,raptor  # select which indexes to build (default: all)
+--raptor-backend custom|official # custom (K-Means) or official (UMAP+GMM)
+```
+
+The indexing pipeline runs up to 7 steps (depending on `--indexes`):
+1. Load and chunk the corpus (fixed 1000-char chunks, 200-char overlap, section-aware) — always runs
+2. Generate context-conditioned embeddings (custom model) — `conditioned`
+3. Store conditioned embeddings in ChromaDB — `conditioned`
+4. Generate LLM context descriptions via GPT-4o-mini (cached) — `contextual`
+5. Store contextual embeddings in ChromaDB (OpenAI text-embedding-3-small) — `contextual`
+6. Build COIL/BM25 lexical index with anchor-term boosting — `coil`
+7. Build RAPTOR hierarchy (cluster, summarize, repeat up to 3 levels) — `raptor`
 
 All data is stored in `database/contextrag/`.
 
@@ -182,7 +191,9 @@ contextrag/
 │   └── coil.py              # Anchor term extraction + weighted BM25 + Jaccard scoring
 ├── hierarchy/
 │   ├── clustering.py        # K-means wrapper (scikit-learn)
-│   └── raptor.py            # RAPTOR tree: build, index, and query across levels
+│   ├── raptor.py            # Custom RAPTOR tree: build, index, and query across levels
+│   ├── backend.py           # Backend abstraction: factory for custom vs official RAPTOR
+│   └── official_raptor.py   # Official RAPTOR adapter (UMAP+GMM via raptor package)
 ├── index/
 │   ├── dense_store.py       # ChromaDB create/query for conditioned + contextual indexes
 │   ├── bm25_store.py        # BM25 build/serialize/query
@@ -211,7 +222,8 @@ database/contextrag/
 ├── contextual/                  # ChromaDB: Anthropic-style contextual index (OpenAI embeddings)
 ├── raptor/                      # ChromaDB: RAPTOR hierarchy embeddings
 ├── bm25_coil.pkl                # Serialized weighted BM25 + anchor data
-├── raptor_tree.json             # RAPTOR hierarchy node tree
+├── raptor_tree.json             # RAPTOR hierarchy node tree (custom backend)
+├── official_raptor_tree.pkl     # Native RAPTOR Tree pickle (official backend)
 ├── llm_context_cache.json       # Cached LLM context descriptions (keyed by chunk_id)
 └── chunks.json                  # Serialized chunk data for query-time hydration
 ```
@@ -222,7 +234,7 @@ database/contextrag/
 |----------|----------|---------|
 | `OPENAI_API_KEY` | Yes (for contextual + RAPTOR signals) | LLM context generation, RAPTOR summarization, contextual embeddings |
 
-Place in `.env` at the project root. Not needed if you use `--skip-llm-context --skip-raptor` during indexing and only query the conditioned + COIL signals.
+Place in `.env` at the project root. Not needed if you only build the conditioned + COIL indexes (`--indexes conditioned,coil`).
 
 ## Key Configuration (config.py)
 
@@ -245,11 +257,11 @@ To demonstrate the value of context conditioning, train and index twice:
 ```bash
 # With context (default)
 uv run python -m contextrag train --context-window 512
-uv run python -m contextrag index
+uv run python -m contextrag index --indexes conditioned
 
 # Without context (baseline)
 uv run python -m contextrag train --context-window 0
-uv run python -m contextrag index --force-rebuild --context-window 0
+uv run python -m contextrag index --indexes conditioned --force-rebuild --context-window 0
 ```
 
 Then run the disambiguation demo query — the context-conditioned model should rank chunks differently based on their position in the document, while the baseline treats identical text the same regardless of where it appears.

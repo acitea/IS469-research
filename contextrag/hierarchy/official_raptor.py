@@ -125,11 +125,30 @@ def build_raptor_tree_official(
     Returns list[HierarchyNode] for compatibility with the rest of the pipeline.
     Persists the native Tree pickle for query-time retrieval via RA.retrieve().
     """
-    ra = RetrievalAugmentation(config=_build_ra_config(max_levels))
+    from collections import defaultdict
 
-    combined_text = "\n\n".join(ctx.chunk.text for ctx in ctx_chunks)
-    logger.info("RAPTOR-Official: building tree from %d chunks...", len(ctx_chunks))
-    ra.add_documents(combined_text)
+    import tiktoken
+    from raptor.utils import split_text
+
+    # Group chunk texts by document, preserving order
+    doc_texts: dict[str, list[str]] = defaultdict(list)
+    for ctx in ctx_chunks:
+        doc_texts[ctx.chunk.doc_file_name].append(ctx.chunk.text)
+
+    # Use RAPTOR's sentence-aware split_text per document
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    max_tokens = 100  # matches tb_max_tokens in _build_ra_config
+    all_chunks: list[str] = []
+    for doc_name, texts in doc_texts.items():
+        doc_text = "\n\n".join(texts)
+        doc_chunks = split_text(doc_text, tokenizer, max_tokens)
+        all_chunks.extend(doc_chunks)
+
+    logger.info("RAPTOR-Official: building tree from %d chunks (%d docs)...", len(all_chunks), len(doc_texts))
+
+    checkpoint_dir = str(DATABASE_DIR / "raptor_checkpoints")
+    ra = RetrievalAugmentation(config=_build_ra_config(max_levels))
+    ra.add_chunks(all_chunks, checkpoint_dir=checkpoint_dir)
 
     # Save using the official API (README: RA.save(path))
     path = _tree_path()
