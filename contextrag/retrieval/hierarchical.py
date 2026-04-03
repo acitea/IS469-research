@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from contextrag.config import DATABASE_DIR, RAPTOR_CANDIDATES_PER_LEVEL, RAPTOR_COLLECTION
-from contextrag.hierarchy.raptor import query_raptor as _query_raptor
 from contextrag.models import RetrievalHit
 
 
@@ -14,7 +13,11 @@ def retrieve_hierarchical(
     persist_dir: Path | None = None,
     collection_name: str = RAPTOR_COLLECTION,
     top_k_per_level: int = RAPTOR_CANDIDATES_PER_LEVEL,
+    raptor_backend: str = "custom",
 ) -> list[RetrievalHit]:
-    """Query the RAPTOR hierarchical index."""
+    """Query the RAPTOR hierarchical index using the specified backend."""
+    from contextrag.hierarchy.backend import get_raptor_backend
+
+    backend = get_raptor_backend(raptor_backend)
     persist_dir = persist_dir or DATABASE_DIR / "raptor"
-    return _query_raptor(query, persist_dir, collection_name, top_k_per_level=top_k_per_level)
+    return backend.query(query, persist_dir, collection_name, top_k_per_level=top_k_per_level)

@@ -1,3 +1,5 @@
+vendor/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -215,7 +217,8 @@ bm25_agentic
 __MACOSX/
 .AppleDouble
 .LSOverride
-Icon[]
+Icon[
+]
 
 # Thumbnails
 ._*

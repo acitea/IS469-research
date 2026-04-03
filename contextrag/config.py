@@ -80,6 +80,12 @@ RAPTOR_MIN_NODES_TO_CLUSTER = 6   # Stop clustering when level has <= this many 
 RAPTOR_CLUSTER_DIVISOR = 10       # k = max(2, ceil(n / divisor))
 RAPTOR_SUMMARY_MAX_TOKENS = 200
 
+# RAPTOR Official Backend (UMAP + GMM)
+RAPTOR_REDUCTION_DIM = 10              # UMAP target dimensions
+RAPTOR_GMM_THRESHOLD = 0.1            # GMM probability threshold for soft clustering
+RAPTOR_MAX_CLUSTER_TOKENS = 3500      # Recursive recluster if cluster exceeds this
+RAPTOR_OFFICIAL_TOP_K = 30            # Collapsed-tree retrieval top-k
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
