@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 from contextrag.config import CHROMA_BATCH_SIZE
 from contextrag.models import ContextualChunk, RetrievalHit
+from contextrag.openai_utils import batch_for_embed, embed_query, embed_texts
 
 logger = logging.getLogger(__name__)
 
@@ -158,51 +158,64 @@ def create_contextual_index(
     collection_name: str,
     embedding_model: str = "text-embedding-3-small",
     force_rebuild: bool = False,
-) -> Chroma:
+) -> None:
     """Store Anthropic-style contextual embeddings using OpenAI embeddings."""
-    persist_dir.mkdir(parents=True, exist_ok=True)
-    embeddings = OpenAIEmbeddings(model=embedding_model)
+    import chromadb
 
-    vector_store = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=str(persist_dir),
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(persist_dir))
+
+    if force_rebuild:
+        try:
+            client.delete_collection(collection_name)
+            logger.info("Cleared existing collection: %s", collection_name)
+        except Exception:
+            pass
+
+    collection = client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine"},
     )
 
-    existing_count = vector_store._collection.count()
-    if existing_count > 0 and not force_rebuild:
-        logger.info("Collection %s already has %d items, skipping", collection_name, existing_count)
-        return vector_store
+    if collection.count() > 0 and not force_rebuild:
+        logger.info("Collection %s already has %d items, skipping", collection_name, collection.count())
+        return
 
-    if force_rebuild and existing_count > 0:
-        vector_store._collection.delete(where={})
-        logger.info("Cleared existing collection: %s", collection_name)
+    texts = [ctx.contextual_embedding_text or ctx.chunk.text for ctx in ctx_chunks]
+    batches = batch_for_embed(texts)
+    all_embeddings: list[list[float]] = []
+    with ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(embed_texts, batch, embedding_model, "Contextual index embeddings"): idx
+            for idx, batch in enumerate(batches)
+        }
+        batch_results: dict[int, list[list[float]]] = {}
+        for future in tqdm(as_completed(futures), total=len(batches),
+                           desc="Contextual index embeddings", unit="batch"):
+            idx = futures[future]
+            batch_results[idx] = future.result()
+    for idx in range(len(batches)):
+        all_embeddings.extend(batch_results[idx])
 
-    # Build LangChain documents with contextual embedding text
-    documents: list[Document] = []
-    for ctx in ctx_chunks:
-        text = ctx.contextual_embedding_text or ctx.chunk.text
-        documents.append(
-            Document(
-                page_content=text,
-                metadata={
+    for i in range(0, len(ctx_chunks), CHROMA_BATCH_SIZE):
+        batch = ctx_chunks[i : i + CHROMA_BATCH_SIZE]
+        collection.upsert(
+            ids=[ctx.chunk.chunk_id for ctx in batch],
+            documents=[ctx.chunk.text for ctx in batch],
+            embeddings=all_embeddings[i : i + CHROMA_BATCH_SIZE],
+            metadatas=[
+                {
                     "chunk_id": ctx.chunk.chunk_id,
                     "doc_file_name": ctx.chunk.doc_file_name,
                     "section_title": ctx.chunk.section_title,
                     "chunk_index": ctx.chunk.chunk_index,
                     "original_text": ctx.chunk.text[:500],
-                },
-            )
+                }
+                for ctx in batch
+            ],
         )
 
-    # Batch add
-    for i in range(0, len(documents), CHROMA_BATCH_SIZE):
-        batch = documents[i : i + CHROMA_BATCH_SIZE]
-        vector_store.add_documents(batch)
-        logger.info("Added batch %d-%d to contextual index", i, i + len(batch))
-
-    logger.info("Indexed %d chunks in contextual collection", len(documents))
-    return vector_store
+    logger.info("Indexed %d chunks in contextual collection", len(ctx_chunks))
 
 
 def query_contextual_index(
@@ -213,25 +226,34 @@ def query_contextual_index(
     top_k: int = 20,
 ) -> list[RetrievalHit]:
     """Query the contextual (OpenAI-embedded) ChromaDB index."""
-    embeddings = OpenAIEmbeddings(model=embedding_model)
-    vector_store = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=str(persist_dir),
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(persist_dir))
+    collection = client.get_collection(collection_name)
+
+    query_embedding = embed_query(query, model=embedding_model)
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
     )
 
-    results = vector_store.similarity_search_with_score(query, k=top_k)
     hits: list[RetrievalHit] = []
-    for rank, (doc, score) in enumerate(results, start=1):
-        chunk_id = doc.metadata.get("chunk_id", f"unknown_{rank}")
-        hits.append(
-            RetrievalHit(
-                chunk_id=chunk_id,
-                signal_name="contextual",
-                rank=rank,
-                score=float(score),
-                text_preview=doc.metadata.get("original_text", doc.page_content[:200]),
+    if results["ids"] and results["ids"][0]:
+        for rank, (cid, doc, dist) in enumerate(
+            zip(results["ids"][0], results["documents"][0], results["distances"][0]),
+            start=1,
+        ):
+            score = 1.0 - dist
+            meta = results["metadatas"][0][rank - 1] if results.get("metadatas") else {}
+            hits.append(
+                RetrievalHit(
+                    chunk_id=cid,
+                    signal_name="contextual",
+                    rank=rank,
+                    score=float(score),
+                    text_preview=meta.get("original_text", doc[:200] if doc else ""),
+                )
             )
-        )
 
     return hits

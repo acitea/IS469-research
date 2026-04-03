@@ -9,15 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from openai import OpenAI
 from tqdm import tqdm
 
 from contextrag.config import (
     CHROMA_BATCH_SIZE,
     DATABASE_DIR,
     EMBEDDING_MODEL,
-    LLM_MODEL,
     RAPTOR_CLUSTER_DIVISOR,
     RAPTOR_MAX_LEVELS,
     RAPTOR_MIN_NODES_TO_CLUSTER,
@@ -25,6 +22,7 @@ from contextrag.config import (
 )
 from contextrag.hierarchy.clustering import cluster_embeddings, compute_n_clusters
 from contextrag.models import ContextualChunk, HierarchyNode, RetrievalHit
+from contextrag.openai_utils import batch_for_embed, embed_texts, embed_query, invoke_llm_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +50,6 @@ def build_raptor_tree(
     Checkpoints embeddings per level to database/contextrag/raptor_checkpoints/
     so that if the process crashes, it can resume without re-embedding.
     """
-    llm = ChatOpenAI(model=LLM_MODEL, temperature=0, max_tokens=RAPTOR_SUMMARY_MAX_TOKENS)
-    embed_batch_size = 2048
-    openai_client = OpenAI()
     checkpoint_dir = DATABASE_DIR / "raptor_checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -101,28 +96,21 @@ def build_raptor_tree(
             level_embeddings = None
 
         if level_embeddings is None:
-            # Embed current level texts (parallel batches)
             logger.info("RAPTOR Level %d: embedding %d texts...", level, len(current_texts))
-            batches = [
-                (i, current_texts[i : i + embed_batch_size])
-                for i in range(0, len(current_texts), embed_batch_size)
-            ]
-
-            def _embed_batch(start: int, texts: list[str]) -> tuple[int, list[list[float]]]:
-                response = openai_client.embeddings.create(input=texts, model=EMBEDDING_MODEL)
-                return start, [d.embedding for d in response.data]
-
-            batch_results: dict[int, list[list[float]]] = {}
+            batches = batch_for_embed(current_texts)
+            all_embeds: list[list[float]] = []
             with ThreadPoolExecutor() as executor:
-                futures = {executor.submit(_embed_batch, start, texts): start for start, texts in batches}
+                futures = {
+                    executor.submit(embed_texts, batch, EMBEDDING_MODEL, f"Level {level} embeddings"): idx
+                    for idx, batch in enumerate(batches)
+                }
+                batch_results: dict[int, list[list[float]]] = {}
                 for future in tqdm(as_completed(futures), total=len(batches),
                                    desc=f"Level {level} embeddings", unit="batch"):
-                    start, embeds = future.result()
-                    batch_results[start] = embeds
-
-            all_embeds: list[list[float]] = []
-            for start, _ in batches:
-                all_embeds.extend(batch_results[start])
+                    idx = futures[future]
+                    batch_results[idx] = future.result()
+            for idx in range(len(batches)):
+                all_embeds.extend(batch_results[idx])
             level_embeddings = np.array(all_embeds)
 
             # Save checkpoint
@@ -134,28 +122,22 @@ def build_raptor_tree(
         n_clusters = compute_n_clusters(len(current_texts), RAPTOR_CLUSTER_DIVISOR)
         clusters = cluster_embeddings(level_embeddings, n_clusters)
 
-        # Summarize each cluster (parallel LLM calls via ThreadPoolExecutor)
-        def _summarize_cluster(cluster_idx: int, member_indices: list[int]) -> tuple[int, str]:
-            member_texts = [current_texts[i][:2000] for i in member_indices]
-            passages = "\n---\n".join(member_texts)
-            try:
-                prompt = _SUMMARY_PROMPT.format(passages=passages[:8000])
-                response = llm.invoke(prompt)
-                return cluster_idx, response.content.strip()
-            except Exception as e:
-                logger.warning("RAPTOR summarization failed for cluster %d: %s", cluster_idx, e)
-                return cluster_idx, " ".join(member_texts)[:1000]
-
-        summaries: dict[int, str] = {}
-        with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(_summarize_cluster, idx, members): idx
-                for idx, members in enumerate(clusters)
-            }
-            for future in tqdm(as_completed(futures), total=len(clusters),
-                               desc=f"Level {level} summarization", unit="cluster"):
-                idx, summary = future.result()
-                summaries[idx] = summary
+        # Build prompts and summarize all clusters in parallel
+        prompts = [
+            _SUMMARY_PROMPT.format(
+                passages="\n---\n".join(current_texts[i][:2000] for i in members)[:8000]
+            )
+            for members in clusters
+        ]
+        summaries_list = invoke_llm_parallel(
+            prompts,
+            max_tokens=RAPTOR_SUMMARY_MAX_TOKENS,
+            desc=f"Level {level} summarization",
+        )
+        # Fallback: replace empty responses with truncated member text
+        for idx, (summary, members) in enumerate(zip(summaries_list, clusters)):
+            if not summary:
+                summaries_list[idx] = " ".join(current_texts[i][:500] for i in members)[:1000]
 
         next_texts: list[str] = []
         next_node_ids: list[str] = []
@@ -163,7 +145,7 @@ def build_raptor_tree(
         next_doc_names: list[list[str]] = []
 
         for cluster_idx, member_indices in enumerate(clusters):
-            summary = summaries[cluster_idx]
+            summary = summaries_list[cluster_idx]
 
             # Gather child info
             child_ids = [current_node_ids[i] for i in member_indices]
@@ -234,19 +216,30 @@ def index_raptor_nodes(
         logger.info("No summary nodes to index")
         return
 
-    # Embed summaries with OpenAI
-    embeddings_model = OpenAIEmbeddings(model=embedding_model)
+    # Embed summaries with OpenAI (parallel batches)
     texts = [n.summary_text for n in summary_nodes]
+    all_embeddings: list[list[float]] = []
+    batches = batch_for_embed(texts)
+    with ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(embed_texts, batch, embedding_model, "Indexing RAPTOR nodes"): idx
+            for idx, batch in enumerate(batches)
+        }
+        batch_results: dict[int, list[list[float]]] = {}
+        for future in tqdm(as_completed(futures), total=len(batches),
+                           desc="Indexing RAPTOR nodes", unit="batch"):
+            idx = futures[future]
+            batch_results[idx] = future.result()
+    for idx in range(len(batches)):
+        all_embeddings.extend(batch_results[idx])
 
-    for i in tqdm(range(0, len(summary_nodes), CHROMA_BATCH_SIZE),
-                   desc="Indexing RAPTOR nodes", unit="batch"):
+    for i in range(0, len(summary_nodes), CHROMA_BATCH_SIZE):
         batch_nodes = summary_nodes[i : i + CHROMA_BATCH_SIZE]
-        batch_texts = texts[i : i + CHROMA_BATCH_SIZE]
-        batch_embeddings = embeddings_model.embed_documents(batch_texts)
+        batch_embeddings = all_embeddings[i : i + CHROMA_BATCH_SIZE]
 
         collection.upsert(
             ids=[n.node_id for n in batch_nodes],
-            documents=batch_texts,
+            documents=[n.summary_text for n in batch_nodes],
             embeddings=batch_embeddings,
             metadatas=[
                 {
@@ -282,8 +275,7 @@ def query_raptor(
     if collection.count() == 0:
         return []
 
-    embeddings_model = OpenAIEmbeddings(model=embedding_model)
-    query_embedding = embeddings_model.embed_query(query)
+    query_embedding = embed_query(query, model=embedding_model)
 
     hits: list[RetrievalHit] = []
 
