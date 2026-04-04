@@ -222,8 +222,8 @@ def query_contextual_index(
     query: str,
     persist_dir: Path,
     collection_name: str,
-    embedding_model: str = "text-embedding-3-small",
     top_k: int = 20,
+    embedding_model: str = "text-embedding-3-small",
 ) -> list[RetrievalHit]:
     """Query the contextual (OpenAI-embedded) ChromaDB index."""
     import chromadb
