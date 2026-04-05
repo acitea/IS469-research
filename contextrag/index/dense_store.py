@@ -16,33 +16,6 @@ from contextrag.openai_utils import batch_for_embed, embed_query, embed_texts
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Custom embedding function that wraps pre-computed numpy arrays
-# ---------------------------------------------------------------------------
-
-
-class PrecomputedEmbeddingFunction:
-    """A ChromaDB-compatible embedding function backed by pre-computed vectors."""
-
-    def __init__(self, dim: int = 768) -> None:
-        self._dim = dim
-        self._store: dict[str, list[float]] = {}
-
-    def register(self, text: str, vector: np.ndarray) -> None:
-        self._store[text] = vector.tolist()
-
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        results = []
-        for text in input:
-            if text in self._store:
-                results.append(self._store[text])
-            else:
-                # Return zero vector for unknown texts (shouldn't happen in practice)
-                results.append([0.0] * self._dim)
-        return results
-
-
 # ---------------------------------------------------------------------------
 # Conditioned index (custom model embeddings)
 # ---------------------------------------------------------------------------

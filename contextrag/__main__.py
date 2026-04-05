@@ -59,12 +59,11 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    from contextrag.cli.commands import cmd_demo, cmd_index, cmd_query, cmd_status
+    from contextrag.cli.commands import cmd_index, cmd_query, cmd_status
 
     commands = {
         "index": cmd_index,
         "query": cmd_query,
-        "demo": cmd_demo,
         "status": cmd_status,
     }
     commands[args.command](args)

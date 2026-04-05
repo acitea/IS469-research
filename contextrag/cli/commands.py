@@ -163,6 +163,8 @@ def cmd_query(args: argparse.Namespace) -> None:
 
     # Collect hits from each signal
     all_hits: list[list] = []
+    hierarchy_nodes: dict[str, HierarchyNode] | None = None
+
 
     if "contextual" in signals:
         logger.info("Querying contextual dense index...")
@@ -187,76 +189,16 @@ def cmd_query(args: argparse.Namespace) -> None:
         hits = retrieve_hierarchical(query)
         all_hits.append(hits)
         logger.info("  RAPTOR: %d hits", len(hits))
+        # Load hierarchy nodes only if RAPTOR was queried
+        raptor_nodes_list = load_raptor_tree(DATABASE_DIR / "raptor_tree.json")
+        hierarchy_nodes = {n.node_id: n for n in raptor_nodes_list}
 
     # Fuse
     fused = reciprocal_rank_fusion(all_hits)
 
-    # Load hierarchy nodes for RAPTOR result hydration
-    raptor_nodes_list = load_raptor_tree(DATABASE_DIR / "raptor_tree.json")
-    hierarchy_nodes = {n.node_id: n for n in raptor_nodes_list}
 
     results = assemble_results(fused, chunks_by_id, hierarchy_nodes, top_n=top_k)
     print_results(results, verbose=args.verbose)
-
-
-# ---------------------------------------------------------------------------
-# demo
-# ---------------------------------------------------------------------------
-
-DEMO_QUERIES = {
-    "anchor": {
-        "name": "Exact-Anchor Query",
-        "query": "What were Foot Locker's total votes for Virginia C. Drosos in the 2022 annual meeting?",
-        "description": "Tests exact entity/date matching — COIL should shine here.",
-    },
-    "paraphrase": {
-        "name": "Semantic Paraphrase Query",
-        "query": "How did cloud computing revenue change over recent years across major tech companies?",
-        "description": "Tests semantic understanding — dense signals should contribute most.",
-    },
-    "disambiguation": {
-        "name": "Context-Disambiguation Query",
-        "query": "What was the net income figure reported in the risk factors section?",
-        "description": "Tests context sensitivity — same metric in different sections should rank differently based on context.",
-    },
-    "cross-section": {
-        "name": "Cross-Section Query",
-        "query": "Summarize the overall financial health across all companies in the corpus.",
-        "description": "Tests hierarchical retrieval — RAPTOR should surface cross-document evidence.",
-    },
-}
-
-
-def cmd_demo(args: argparse.Namespace) -> None:
-    """Run preset demo queries."""
-    setup_logging()
-    load_env()
-
-    query_types = [args.query_type] if args.query_type else list(DEMO_QUERIES.keys())
-
-    for qt in query_types:
-        demo = DEMO_QUERIES.get(qt)
-        if not demo:
-            print(f"Unknown query type: {qt}")
-            continue
-
-        print(f"\n{'#'*80}")
-        print(f" DEMO: {demo['name']}")
-        print(f" Query: {demo['query']}")
-        print(f" {demo['description']}")
-        print(f"{'#'*80}")
-
-        # Reuse query logic
-        ns = argparse.Namespace(
-            query=demo["query"],
-            top_k=5,
-            signals=None,
-            verbose=True,
-        )
-        try:
-            cmd_query(ns)
-        except Exception as e:
-            print(f"  Error: {e}")
 
 
 # ---------------------------------------------------------------------------

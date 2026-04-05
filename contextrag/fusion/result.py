@@ -23,7 +23,8 @@ def assemble_results(
     Args:
         fused: Output of ``reciprocal_rank_fusion``.
         chunks_by_id: Mapping from chunk_id to ``ContextualChunk``.
-        hierarchy_nodes: Mapping from node_id to ``HierarchyNode`` (for RAPTOR hits).
+        hierarchy_nodes: Mapping from node_id to ``HierarchyNode`` (for RAPTOR hits). 
+                         If None/empty, RAPTOR hydration is skipped.
         top_n: Number of results to return.
     """
     hierarchy_nodes = hierarchy_nodes or {}
@@ -50,25 +51,26 @@ def assemble_results(
             )
             continue
 
-        # Try RAPTOR hierarchy node
-        node = hierarchy_nodes.get(chunk_id)
-        if node:
-            results.append(
-                FusedResult(
-                    rank=rank,
-                    chunk_id=chunk_id,
-                    text=node.summary_text,
-                    doc_file_name=", ".join(node.doc_file_names[:3]),
-                    section_title=f"RAPTOR Level {node.level} Summary",
-                    preceding_context="",
-                    llm_context="",
-                    fused_score=fused_score,
-                    signal_contributions=contributions,
-                    hierarchy_level=node.level,
-                    source_chunk_ids=node.source_chunk_ids,
+        # Try RAPTOR hierarchy node (only if hierarchy nodes were provided)
+        if hierarchy_nodes:
+            node = hierarchy_nodes.get(chunk_id)
+            if node:
+                results.append(
+                    FusedResult(
+                        rank=rank,
+                        chunk_id=chunk_id,
+                        text=node.summary_text,
+                        doc_file_name=", ".join(node.doc_file_names[:3]),
+                        section_title=f"RAPTOR Level {node.level} Summary",
+                        preceding_context="",
+                        llm_context="",
+                        fused_score=fused_score,
+                        signal_contributions=contributions,
+                        hierarchy_level=node.level,
+                        source_chunk_ids=node.source_chunk_ids,
+                    )
                 )
-            )
-            continue
+                continue
 
         # Fallback: minimal result
         text_preview = ""
