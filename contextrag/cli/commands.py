@@ -1,4 +1,4 @@
-"""CLI subcommands: train, index, query, demo, status."""
+"""CLI subcommands: index, query, demo, status."""
 
 from __future__ import annotations
 
@@ -7,49 +7,17 @@ import logging
 from pathlib import Path
 
 from contextrag.config import (
-    CONDITIONED_COLLECTION,
+    DENSE_COLLECTION,
     CONTEXTUAL_COLLECTION,
     DATABASE_DIR,
-    DEFAULT_CONTEXT_WINDOW,
     DEFAULT_TOP_K,
     RAPTOR_COLLECTION,
     TEXTS_DIR,
-    TRAIN_BATCH_SIZE,
-    TRAIN_EPOCHS,
-    TRAIN_LR,
-    TRAIN_NUM_ARTICLES,
     load_env,
     setup_logging,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# train
-# ---------------------------------------------------------------------------
-
-
-def cmd_train(args: argparse.Namespace) -> None:
-    """Train the context-conditioned encoder on Wikipedia."""
-    setup_logging()
-    load_env()
-
-    from contextrag.nn.trainer import train
-
-    logger.info(
-        "Starting training: context_window=%d, epochs=%d, batch_size=%d, lr=%s, articles=%d",
-        args.context_window, args.epochs, args.batch_size, args.lr, args.num_articles,
-    )
-    model_path = train(
-        context_window=args.context_window,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        num_articles=args.num_articles,
-        device_name=args.device,
-    )
-    print(f"\nTraining complete. Model saved to: {model_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +36,7 @@ def cmd_index(args: argparse.Namespace) -> None:
     from contextrag.index.persistence import save_chunks, save_raptor_tree
     from contextrag.models import ContextualChunk
 
-    ALL_INDEXES = {"conditioned", "contextual", "coil", "raptor"}
+    ALL_INDEXES = {"dense", "contextual", "coil", "raptor"}
     indexes = set(args.indexes.split(",")) if args.indexes else ALL_INDEXES
     invalid = indexes - ALL_INDEXES
     if invalid:
@@ -89,29 +57,28 @@ def cmd_index(args: argparse.Namespace) -> None:
         all_chunks.extend(chunks)
     logger.info("Total chunks: %d", len(all_chunks))
 
-    # Step 2+3: Context-conditioned embeddings (custom model)
-    if "conditioned" in indexes:
+    # Step 2: Dense embeddings (using specified embedder mode)
+    if "dense" in indexes:
         from contextrag.nn.embed import embed_chunks
         from contextrag.index.dense_store import create_conditioned_index
 
-        logger.info("Generating context-conditioned embeddings...")
+        logger.info("Generating dense embeddings using %s mode...", args.embedder_mode)
         ctx_chunks, embeddings = embed_chunks(
             all_chunks, doc_texts,
-            context_window=args.context_window,
-            device_name=args.device,
+            embedder_mode=args.embedder_mode,
         )
 
-        logger.info("Indexing conditioned embeddings in ChromaDB...")
-        conditioned_dir = DATABASE_DIR / "conditioned"
+        logger.info("Indexing dense embeddings in ChromaDB...")
+        dense_dir = DATABASE_DIR / "dense"
         create_conditioned_index(
-            ctx_chunks, embeddings, conditioned_dir, CONDITIONED_COLLECTION, force_rebuild=force,
+            ctx_chunks, embeddings, dense_dir, DENSE_COLLECTION, force_rebuild=force,
         )
     else:
-        # Wrap chunks with preceding context (no model inference)
+        # Wrap chunks with preceding context (no embedding inference)
         from contextrag.nn.embed import prepare_ctx_chunks
-        ctx_chunks = prepare_ctx_chunks(all_chunks, doc_texts, context_window=args.context_window)
+        ctx_chunks = prepare_ctx_chunks(all_chunks, doc_texts)
 
-    # Step 4: Anthropic-style contextual retrieval
+    # Step 3: LLM-based contextual retrieval
     if "contextual" in indexes:
         logger.info("Generating LLM context descriptions...")
         from contextrag.context.contextual import generate_llm_contexts
@@ -125,7 +92,7 @@ def cmd_index(args: argparse.Namespace) -> None:
             ctx_chunks, contextual_dir, CONTEXTUAL_COLLECTION, force_rebuild=force,
         )
 
-    # Step 5: COIL/BM25 lexical index
+    # Step 4: COIL/BM25 lexical index
     if "coil" in indexes:
         from contextrag.index.bm25_store import create_bm25_index
 
@@ -133,7 +100,7 @@ def cmd_index(args: argparse.Namespace) -> None:
         bm25_path = DATABASE_DIR / "bm25_coil.pkl"
         create_bm25_index(ctx_chunks, bm25_path, force_rebuild=force)
 
-    # Step 6: RAPTOR hierarchy
+    # Step 5: RAPTOR hierarchy
     if "raptor" in indexes:
         logger.info("Building RAPTOR hierarchy...")
         from contextrag.hierarchy.raptor import RaptorBackend
@@ -145,7 +112,7 @@ def cmd_index(args: argparse.Namespace) -> None:
         raptor_dir = DATABASE_DIR / "raptor"
         backend.index_nodes(raptor_nodes, raptor_dir, RAPTOR_COLLECTION, force_rebuild=force)
 
-    # Step 7: Save chunk data for query-time hydration
+    # Step 6: Save chunk data for query-time hydration
     save_chunks(ctx_chunks, DATABASE_DIR / "chunks.json")
 
     built = ", ".join(sorted(indexes))
@@ -163,19 +130,16 @@ def cmd_query(args: argparse.Namespace) -> None:
     load_env()
 
     import numpy as np
-    import torch
 
     from contextrag.cli.display import print_results
-    from contextrag.config import MODEL_DIR
     from contextrag.fusion.ranker import reciprocal_rank_fusion
     from contextrag.fusion.result import assemble_results
     from contextrag.index.persistence import load_chunks, load_raptor_tree
     from contextrag.models import ContextualChunk, Chunk, HierarchyNode
-    from contextrag.nn.encoder import ContextConditionedEncoder
 
     query = args.query
     top_k = args.top_k
-    signals = set(args.signals.split(",")) if args.signals else {"conditioned", "contextual", "coil", "raptor"}
+    signals = set(args.signals.split(",")) if args.signals else {"dense", "contextual", "coil", "raptor"}
 
     # Load chunks for hydration
     chunk_data = load_chunks(DATABASE_DIR / "chunks.json")
@@ -199,23 +163,6 @@ def cmd_query(args: argparse.Namespace) -> None:
 
     # Collect hits from each signal
     all_hits: list[list] = []
-
-    if "conditioned" in signals:
-        logger.info("Querying conditioned dense index...")
-        # Embed query with the trained model
-        model = ContextConditionedEncoder()
-        model_path = MODEL_DIR / "best_model.pt"
-        if model_path.exists():
-            model.load_trainable(str(model_path))
-        model.eval()
-        with torch.no_grad():
-            # For query, we use encode_no_context since the query has no preceding document context
-            query_emb = model.encode_no_context([query]).cpu().numpy()[0]
-
-        from contextrag.retrieval.dense import retrieve_conditioned
-        hits = retrieve_conditioned(query_emb, top_k=top_k)
-        all_hits.append(hits)
-        logger.info("  Conditioned: %d hits", len(hits))
 
     if "contextual" in signals:
         logger.info("Querying contextual dense index...")
@@ -324,18 +271,8 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     status: dict[str, str | int] = {}
 
-    # Model
-    model_path = DATABASE_DIR / "model" / "best_model.pt"
-    status["Trained model"] = "yes" if model_path.exists() else "no"
-
-    if (DATABASE_DIR / "model" / "train_config.json").exists():
-        import json
-        config = json.loads((DATABASE_DIR / "model" / "train_config.json").read_text())
-        status["  context_window"] = config.get("context_window", "?")
-        status["  best_val_loss"] = config.get("best_val_loss", "?")
-
     # Indexes
-    status["Conditioned index"] = "yes" if index_exists(DATABASE_DIR / "conditioned", CONDITIONED_COLLECTION) else "no"
+    status["Dense index"] = "yes" if index_exists(DATABASE_DIR / "dense", DENSE_COLLECTION) else "no"
     status["Contextual index"] = "yes" if index_exists(DATABASE_DIR / "contextual", CONTEXTUAL_COLLECTION) else "no"
     status["BM25/COIL index"] = "yes" if (DATABASE_DIR / "bm25_coil.pkl").exists() else "no"
     status["RAPTOR index"] = "yes" if index_exists(DATABASE_DIR / "raptor", RAPTOR_COLLECTION) else "no"

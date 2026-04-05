@@ -1,47 +1,27 @@
-"""Batch inference for producing context-conditioned embeddings."""
+"""Batch inference for producing embeddings using pluggable embedders."""
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-
 import numpy as np
-import torch
 from tqdm import tqdm
 
-from contextrag.config import DATABASE_DIR, DEFAULT_CONTEXT_WINDOW, MODEL_DIR
+from contextrag.config import DATABASE_DIR, EMBEDDER_MODE
 from contextrag.models import Chunk, ContextualChunk
-from contextrag.nn.encoder import ContextConditionedEncoder
+from contextrag.nn.embedders import get_embedder
 
 logger = logging.getLogger(__name__)
-
-
-def _get_preceding_context(
-    chunk: Chunk,
-    doc_texts: dict[str, str],
-    context_window_tokens: int,
-) -> str:
-    """Extract preceding document text for a chunk."""
-    full_text = doc_texts.get(chunk.doc_file_name, "")
-    if context_window_tokens == 0 or not full_text:
-        return ""
-    preceding = full_text[: chunk.char_offset_start]
-    if context_window_tokens > 0:
-        # Approximate: 1 token ≈ 4 chars
-        max_chars = context_window_tokens * 4
-        preceding = preceding[-max_chars:]
-    return preceding
 
 
 def prepare_ctx_chunks(
     chunks: list[Chunk],
     doc_texts: dict[str, str],
-    context_window: int = DEFAULT_CONTEXT_WINDOW,
 ) -> list[ContextualChunk]:
     """Wrap raw Chunks with preceding context — no model inference."""
     ctx_chunks: list[ContextualChunk] = []
     for chunk in chunks:
-        preceding = _get_preceding_context(chunk, doc_texts, context_window)
+        full_text = doc_texts.get(chunk.doc_file_name, "")
+        preceding = full_text[: chunk.char_offset_start] if full_text else ""
         ctx_chunks.append(ContextualChunk(
             chunk=chunk,
             preceding_context=preceding,
@@ -53,54 +33,38 @@ def prepare_ctx_chunks(
 def embed_chunks(
     chunks: list[Chunk],
     doc_texts: dict[str, str],
-    context_window: int = DEFAULT_CONTEXT_WINDOW,
+    embedder_mode: str = EMBEDDER_MODE,
     batch_size: int = 16,
-    model_path: Path | None = None,
-    device_name: str | None = None,
 ) -> tuple[list[ContextualChunk], np.ndarray]:
-    """Produce context-conditioned embeddings for all chunks.
+    """Produce embeddings for all chunks using the specified embedder.
+
+    Supports three modes:
+    - "default": chunks embedded standalone (OpenAI text-embedding-3-small)
+    - "contextual": chunks + semantic pooling of preceding context (OpenAI + pooling)
+    - "voyage": chunks with native contextualization (Voyage API)
 
     Returns (contextual_chunks, embeddings_array) where embeddings_array
-    has shape ``(N, 768)``.
+    has shape ``(N, 512)`` (all embedders output 512 dimensions).
     """
-    if device_name:
-        device = torch.device(device_name)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    logger.info(f"Embedding {len(chunks)} chunks using embedder: {embedder_mode}")
 
-    # Load model
-    model = ContextConditionedEncoder()
-    model_path = model_path or MODEL_DIR / "best_model.pt"
-    if model_path.exists():
-        model.load_trainable(str(model_path), map_location=str(device))
-        logger.info("Loaded trained weights from %s", model_path)
-    else:
-        logger.warning("No trained model at %s — using random init", model_path)
-    model.to(device)
-    model.eval()
+    # Get embedder instance
+    embedder = get_embedder(embedder_mode)
+    logger.info(f"Using embedder: {embedder.__class__.__name__}")
 
-    # Build contextual chunks with preceding context
-    ctx_chunks = prepare_ctx_chunks(chunks, doc_texts, context_window)
+    # Build contextual chunks with preceding context metadata
+    ctx_chunks = prepare_ctx_chunks(chunks, doc_texts)
 
-    # Batch inference
+    # Batch embedding using the embedder
     all_embeddings: list[np.ndarray] = []
-    num_batches = (len(ctx_chunks) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(ctx_chunks), batch_size), total=num_batches, desc="Embedding chunks", unit="batch"):
-        batch = ctx_chunks[i : i + batch_size]
-        chunk_texts = [c.chunk.text for c in batch]
-        context_texts = [c.preceding_context for c in batch]
+    num_batches = (len(chunks) + batch_size - 1) // batch_size
 
-        with torch.no_grad():
-            if context_window == 0:
-                emb = model.encode_no_context(chunk_texts)
-            else:
-                emb = model(chunk_texts, context_texts)
-
-        all_embeddings.append(emb.cpu().numpy())
+    for i in tqdm(range(0, len(chunks), batch_size), total=num_batches, desc="Embedding chunks", unit="batch"):
+        batch_chunks = chunks[i : i + batch_size]
+        
+        # Get batch of embeddings from the embedder
+        batch_embeddings = embedder.embed_chunks_with_context(batch_chunks, doc_texts)
+        all_embeddings.append(batch_embeddings)
 
     embeddings = np.concatenate(all_embeddings, axis=0)
     logger.info("Produced %d embeddings of dim %d", embeddings.shape[0], embeddings.shape[1])

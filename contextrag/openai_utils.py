@@ -17,7 +17,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-from typing import TypeVar
+from typing import TypeVar, Any
 
 from tqdm import tqdm
 
@@ -276,6 +276,7 @@ def embed_texts(
     texts: list[str],
     model: str = EMBEDDING_MODEL,
     desc: str = "Embedding",
+    output_dimension: int | None = None,
 ) -> list[list[float]]:
     """Embed texts while automatically handling request-size limits.
 
@@ -284,6 +285,12 @@ def embed_texts(
     - proactively throttles embedding TPM to reduce rate-limit failures
     - deduplicates identical inputs and reuses persistent cache hits
     - persists embeddings to disk for reuse across runs
+
+    Args:
+        texts: List of strings to embed
+        model: Embedding model name
+        desc: Description for logging
+        output_dimension: Output dimension (e.g. 512 for smaller embeddings). None = default dimension.
 
     Returns embeddings in the same order as ``texts``.
     """
@@ -335,7 +342,11 @@ def embed_texts(
     for batch in batches:
         batch_tokens = sum(text_to_count[text] for text in batch)
         _acquire_embed_tpm_budget(batch_tokens, desc)
-        response = client.embeddings.create(input=batch, model=model)
+        # Build API call with optional output_dimension
+        api_kwargs = {"input": batch, "model": model}
+        if output_dimension is not None:
+            api_kwargs["dimensions"] = output_dimension
+        response = client.embeddings.create(**api_kwargs)
         if len(response.data) != len(batch):
             raise RuntimeError(
                 f"Embedding response size mismatch: expected {len(batch)}, got {len(response.data)}"
@@ -385,3 +396,116 @@ def invoke_llm_parallel(
             return ""
 
     return run_parallel(prompts, _call, desc=desc)
+
+
+def _get_tokenizer(model: str) -> Any:
+    """Get the appropriate tokenizer for a model using standard libraries."""
+    if "text-embedding" in model or "gpt" in model:
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    elif "voyage" in model:
+        import voyageai  # type: ignore
+        return voyageai.Client()  # type: ignore
+    else:
+        # Try huggingface transformers for other models
+        from transformers import AutoTokenizer  # type: ignore
+        return AutoTokenizer.from_pretrained(model)
+
+
+def count_tokens(text: str, model: str = "text-embedding-3-small") -> int:
+    """Count the number of tokens in text using the model's appropriate tokenizer.
+    
+    Args:
+        text: Text to count tokens for
+        model: Model name/identifier (e.g., "text-embedding-3-small", "voyage-context-3")
+    
+    Returns: Token count
+    """
+    tokenizer = _get_tokenizer(model)
+    
+    # Handle Voyage tokenizer (voyageai.Client)
+    if hasattr(tokenizer, "count_tokens"):
+        try:
+            return tokenizer.count_tokens([text], model=model)
+        except Exception as e:
+            logger.warning("Voyage count_tokens failed for %s: %s", model, e)
+    
+    # Handle tiktoken-like tokenizer (has encode/decode)
+    if hasattr(tokenizer, "encode"):
+        return len(tokenizer.encode(text))
+    
+    raise ValueError(f"Tokenizer for {model} does not support count_tokens or encode")
+
+
+def split_text_into_token_windows(
+    text: str,
+    max_window_tokens: int,
+    overlap_ratio: float = 0.25,
+    model: str = "text-embedding-3-small",
+) -> list[str]:
+    """Split text into overlapping token-based windows using model's tokenizer.
+    
+    Args:
+        text: Text to split
+        max_window_tokens: Maximum tokens per window
+        overlap_ratio: Overlap ratio (e.g., 0.25 = 25% overlap)
+        model: Model name/identifier (e.g., "text-embedding-3-small", "voyage-context-3")
+    
+    Returns: List of text windows with specified overlap.
+    """
+    tokenizer = _get_tokenizer(model)
+    
+    # Use encoding/decoding if available (tiktoken-like)
+    if hasattr(tokenizer, "encode") and hasattr(tokenizer, "decode"):
+        tokens = tokenizer.encode(text)
+        if len(tokens) <= max_window_tokens:
+            return [text]
+        
+        windows = []
+        step_size = int(max_window_tokens * (1.0 - overlap_ratio))
+        step_size = max(1, step_size)  # Ensure at least 1 token per step
+        
+        for i in range(0, len(tokens), step_size):
+            window_tokens = tokens[i : i + max_window_tokens]
+            if not window_tokens:
+                break
+            window_text = tokenizer.decode(window_tokens)
+            windows.append(window_text)
+            
+            # Stop if we've reached the end
+            if i + max_window_tokens >= len(tokens):
+                break
+        
+        return windows if windows else [text]
+    
+    # For tokenizers without decode (e.g., Voyage), split on character boundaries
+    # and use count_tokens to validate window sizes
+    logger.debug("Using character-based window splitting for model %s (no decode support)", model)
+    words = text.split()
+    if not words:
+        return [text]
+    
+    windows = []
+    current_window = []
+    current_tokens = 0
+    
+    for word in words:
+        word_tokens = count_tokens(word, model=model)
+        
+        if current_window and current_tokens + word_tokens > max_window_tokens:
+            # Flush current window
+            window_text = " ".join(current_window)
+            windows.append(window_text)
+            
+            # Calculate overlap: include some words from the current window in the next
+            overlap_size = max(1, int(len(current_window) * (1.0 - overlap_ratio)))
+            current_window = current_window[-overlap_size:] if overlap_size > 0 else []
+            current_tokens = sum(count_tokens(w, model=model) for w in current_window)
+        
+        current_window.append(word)
+        current_tokens += word_tokens
+    
+    if current_window:
+        windows.append(" ".join(current_window))
+    
+    return windows if windows else [text]

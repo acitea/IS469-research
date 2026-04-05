@@ -108,43 +108,6 @@ def create_conditioned_index(
     logger.info("Indexed %d chunks in %s", len(ctx_chunks), collection_name)
 
 
-def query_conditioned_index(
-    query_embedding: np.ndarray,
-    persist_dir: Path,
-    collection_name: str,
-    top_k: int = 20,
-) -> list[RetrievalHit]:
-    """Query the conditioned ChromaDB index with a pre-computed query embedding."""
-    import chromadb
-
-    client = chromadb.PersistentClient(path=str(persist_dir))
-    collection = client.get_collection(collection_name)
-
-    results = collection.query(
-        query_embeddings=[query_embedding.tolist()],
-        n_results=top_k,
-        include=["documents", "metadatas", "distances"],
-    )
-
-    hits: list[RetrievalHit] = []
-    if results["ids"] and results["ids"][0]:
-        for rank, (cid, doc, dist) in enumerate(
-            zip(results["ids"][0], results["documents"][0], results["distances"][0]),
-            start=1,
-        ):
-            # ChromaDB cosine distance: 0 = identical, 2 = opposite
-            score = 1.0 - dist  # Convert to similarity
-            hits.append(
-                RetrievalHit(
-                    chunk_id=cid,
-                    signal_name="conditioned",
-                    rank=rank,
-                    score=score,
-                    text_preview=doc[:200] if doc else "",
-                )
-            )
-
-    return hits
 
 
 # ---------------------------------------------------------------------------

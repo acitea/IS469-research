@@ -20,10 +20,7 @@ MODEL_DIR = DATABASE_DIR / "model"
 # ---------------------------------------------------------------------------
 
 LLM_MODEL = "gpt-4o-mini"
-EMBEDDING_MODEL = "text-embedding-3-small"  # OpenAI embeddings for contextual retrieval
-BACKBONE_MODEL = "BAAI/bge-base-en-v1.5"   # Frozen encoder backbone for conditioned embeddings
-BACKBONE_DIM = 768                          # Hidden dimension of backbone
-BACKBONE_MAX_TOKENS = 512                   # Max sequence length per encoding pass
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 # ---------------------------------------------------------------------------
 # Chunking
@@ -33,23 +30,20 @@ CHUNK_SIZE = 1000          # characters per chunk
 CHUNK_OVERLAP = 200        # character overlap between chunks
 
 # ---------------------------------------------------------------------------
-# Context-Conditioned Encoder
+# Embedder Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONTEXT_WINDOW = 512   # tokens of preceding text (0=none, -1=full doc)
-CROSS_ATTENTION_HEADS = 8
-TRAIN_EPOCHS = 20
-TRAIN_BATCH_SIZE = 32
-TRAIN_LR = 1e-4
-TRAIN_VAL_SPLIT = 0.1
-TRAIN_NUM_ARTICLES = 5000      # Wikipedia articles to sample for training
-TRAIN_MIN_ARTICLE_CHARS = 2000 # Minimum article length to include
+EMBEDDER_MODE = os.getenv("EMBEDDER_MODE", "default")  # "default" | "contextual" | "voyage"
+OUTPUT_DIMENSION = 512  # All embedders output 512-dim embeddings
+POOLING_STRATEGY = os.getenv("POOLING_STRATEGY", "max")  # "max" | "mean" for contextual mode
+CONTEXT_POOLING_OVERLAP_RATIO = 0.25  # 25% overlap in context windows
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")  # Set via environment variable
 
 # ---------------------------------------------------------------------------
 # ChromaDB Collections
 # ---------------------------------------------------------------------------
 
-CONDITIONED_COLLECTION = "contextrag_conditioned"
+DENSE_COLLECTION = "contextrag_dense"
 CONTEXTUAL_COLLECTION = "contextrag_contextual"
 RAPTOR_COLLECTION = "contextrag_raptor"
 CHROMA_BATCH_SIZE = 5000
