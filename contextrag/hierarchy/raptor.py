@@ -305,3 +305,20 @@ def query_raptor(
 
     logger.info("RAPTOR query returned %d hits across levels", len(hits))
     return hits
+
+
+class RaptorBackend:
+    """K-Means-based RAPTOR implementation."""
+
+    def build_tree(self, ctx_chunks: list[ContextualChunk], **kwargs: Any) -> list[HierarchyNode]:
+        return build_raptor_tree(ctx_chunks, **kwargs)
+
+    def index_nodes(
+        self, nodes: list[HierarchyNode], persist_dir: Path, collection_name: str, **kwargs: Any,
+    ) -> None:
+        index_raptor_nodes(nodes, persist_dir, collection_name, **kwargs)
+
+    def query(
+        self, query: str, persist_dir: Path, collection_name: str, **kwargs: Any,
+    ) -> list[RetrievalHit]:
+        return query_raptor(query, persist_dir, collection_name, **kwargs)

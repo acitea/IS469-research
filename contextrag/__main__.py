@@ -47,8 +47,6 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Device name (cuda, mps, cpu). Auto-detected if omitted.")
     p_index.add_argument("--indexes", type=str, default=None,
                          help="Comma-separated indexes to build: conditioned,contextual,coil,raptor. Default: all.")
-    p_index.add_argument("--raptor-backend", type=str, choices=["custom", "official"], default="custom",
-                         help="RAPTOR impl: 'custom' (K-Means) or 'official' (UMAP+GMM). Default: %(default)s")
 
     # -- query ---------------------------------------------------------------
     p_query = sub.add_parser("query", help="Run a query against all indexes.")
@@ -57,8 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("--signals", type=str, default=None,
                          help="Comma-separated signals: conditioned,contextual,coil,raptor. Default: all.")
     p_query.add_argument("--verbose", action="store_true")
-    p_query.add_argument("--raptor-backend", type=str, choices=["custom", "official"], default="custom",
-                         help="RAPTOR backend to query. Must match indexing backend. Default: %(default)s")
 
     # -- demo ----------------------------------------------------------------
     p_demo = sub.add_parser("demo", help="Run preset demo queries.")

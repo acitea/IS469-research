@@ -135,10 +135,10 @@ def cmd_index(args: argparse.Namespace) -> None:
 
     # Step 6: RAPTOR hierarchy
     if "raptor" in indexes:
-        logger.info("Building RAPTOR hierarchy (backend=%s)...", args.raptor_backend)
-        from contextrag.hierarchy.backend import get_raptor_backend
+        logger.info("Building RAPTOR hierarchy...")
+        from contextrag.hierarchy.raptor import RaptorBackend
 
-        backend = get_raptor_backend(args.raptor_backend)
+        backend = RaptorBackend()
         raptor_nodes = backend.build_tree(ctx_chunks)
         save_raptor_tree(raptor_nodes, DATABASE_DIR / "raptor_tree.json")
 
@@ -237,8 +237,7 @@ def cmd_query(args: argparse.Namespace) -> None:
     if "raptor" in signals:
         logger.info("Querying RAPTOR hierarchical index...")
         from contextrag.retrieval.hierarchical import retrieve_hierarchical
-        raptor_backend = getattr(args, "raptor_backend", "custom")
-        hits = retrieve_hierarchical(query, raptor_backend=raptor_backend)
+        hits = retrieve_hierarchical(query)
         all_hits.append(hits)
         logger.info("  RAPTOR: %d hits", len(hits))
 
@@ -306,7 +305,6 @@ def cmd_demo(args: argparse.Namespace) -> None:
             top_k=5,
             signals=None,
             verbose=True,
-            raptor_backend="custom",
         )
         try:
             cmd_query(ns)

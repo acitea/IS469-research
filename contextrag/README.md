@@ -17,7 +17,7 @@ This conditioned signal is fused with three complementary retrieval signals to c
 | **Conditioned** | Custom cross-attention NN on frozen BGE-base-en-v1.5 | Semantic meaning influenced by document context |
 | **Contextual** | GPT-4o-mini generates per-chunk context descriptions, embedded with `text-embedding-3-small` | Explicit articulation of chunk's role in the document |
 | **COIL** | Anchor-term-boosted weighted BM25 + Jaccard overlap | Exact entity/date matching (dollar amounts, tickers, years) |
-| **RAPTOR** | Multi-level clustering + LLM summarization tree (custom K-Means or official UMAP+GMM) | Cross-section and cross-document evidence |
+| **RAPTOR** | Multi-level clustering + LLM summarization tree (custom K-Means) | Cross-section and cross-document evidence |
 
 All signals are combined via **Reciprocal Rank Fusion** (RRF, k=60) into a single ranked result with full per-signal provenance.
 
@@ -70,11 +70,6 @@ All signals are combined via **Reciprocal Rank Fusion** (RRF, k=60) into a singl
 
 ### Install
 
-```bash
-uv sync
-uv pip install ./raptor  # official RAPTOR package (local fork)
-```
-
 ### 1. Train the encoder
 
 Train the context-conditioned encoder on Wikipedia articles:
@@ -110,7 +105,7 @@ Build specific indexes only:
 
 ```bash
 uv run python -m contextrag index --indexes conditioned,coil
-uv run python -m contextrag index --indexes raptor --raptor-backend official
+uv run python -m contextrag index --indexes raptor
 uv run python -m contextrag index --indexes contextual --force-rebuild
 ```
 
@@ -121,7 +116,6 @@ Options:
 --context-window 512             # must match the value used during training
 --device cuda                    # device for conditioned embedding inference
 --indexes conditioned,contextual,coil,raptor  # select which indexes to build (default: all)
---raptor-backend custom|official # custom (K-Means) or official (UMAP+GMM)
 ```
 
 The indexing pipeline runs up to 7 steps (depending on `--indexes`):
@@ -191,9 +185,7 @@ contextrag/
 │   └── coil.py              # Anchor term extraction + weighted BM25 + Jaccard scoring
 ├── hierarchy/
 │   ├── clustering.py        # K-means wrapper (scikit-learn)
-│   ├── raptor.py            # Custom RAPTOR tree: build, index, and query across levels
-│   ├── backend.py           # Backend abstraction: factory for custom vs official RAPTOR
-│   └── official_raptor.py   # Official RAPTOR adapter (UMAP+GMM via raptor package)
+│   └── raptor.py            # K-Means RAPTOR tree: build, index, and query across levels
 ├── index/
 │   ├── dense_store.py       # ChromaDB create/query for conditioned + contextual indexes
 │   ├── bm25_store.py        # BM25 build/serialize/query
@@ -222,8 +214,7 @@ database/contextrag/
 ├── contextual/                  # ChromaDB: Anthropic-style contextual index (OpenAI embeddings)
 ├── raptor/                      # ChromaDB: RAPTOR hierarchy embeddings
 ├── bm25_coil.pkl                # Serialized weighted BM25 + anchor data
-├── raptor_tree.json             # RAPTOR hierarchy node tree (custom backend)
-├── official_raptor_tree.pkl     # Native RAPTOR Tree pickle (official backend)
+├── raptor_tree.json             # RAPTOR hierarchy node tree
 ├── llm_context_cache.json       # Cached LLM context descriptions (keyed by chunk_id)
 └── chunks.json                  # Serialized chunk data for query-time hydration
 ```
