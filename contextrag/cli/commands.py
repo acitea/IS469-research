@@ -165,6 +165,15 @@ def cmd_query(args: argparse.Namespace) -> None:
     all_hits: list[list] = []
     hierarchy_nodes: dict[str, HierarchyNode] | None = None
 
+    if "dense" in signals:
+        logger.info("Querying dense index...")
+        from contextrag.retrieval.dense import retrieve_dense
+        try:
+            hits = retrieve_dense(query, top_k=top_k)
+            all_hits.append(hits)
+            logger.info("  Dense: %d hits", len(hits))
+        except Exception as e:
+            logger.warning("Dense index not available: %s", e)
 
     if "contextual" in signals:
         logger.info("Querying contextual dense index...")

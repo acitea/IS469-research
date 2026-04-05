@@ -193,3 +193,51 @@ def query_contextual_index(
             )
 
     return hits
+
+
+def query_dense_index(
+    query: str,
+    persist_dir: Path,
+    collection_name: str,
+    top_k: int = 20,
+    embedder_mode: str = "default",
+) -> list[RetrievalHit]:
+    """Query the dense ChromaDB index. (Just a basic vector store)
+    
+    The query is embedded using the specified embedder mode to match the index.
+    """
+    import chromadb
+    from contextrag.nn.embedders import get_embedder
+
+    client = chromadb.PersistentClient(path=str(persist_dir))
+    collection = client.get_collection(collection_name)
+
+    # Embed query using the same embedder mode as the index
+    embedder = get_embedder(embedder_mode)
+    query_embedding = embedder.embed([query])[0].tolist()
+
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    hits: list[RetrievalHit] = []
+    if results["ids"] and results["ids"][0]:
+        for rank, (cid, doc, dist) in enumerate(
+            zip(results["ids"][0], results["documents"][0], results["distances"][0]),
+            start=1,
+        ):
+            score = 1.0 - dist
+            meta = results["metadatas"][0][rank - 1] if results.get("metadatas") else {}
+            hits.append(
+                RetrievalHit(
+                    chunk_id=cid,
+                    signal_name="dense",
+                    rank=rank,
+                    score=float(score),
+                    text_preview=meta.get("original_text", doc[:200] if doc else ""),
+                )
+            )
+
+    return hits
