@@ -212,6 +212,10 @@ database/
 database_agentic/
 
 bm25_agentic
+# Evaluation cache and vector database (large files)
+evals/cache/
+evals/database/
+
 # General
 .DS_Store
 __MACOSX/
